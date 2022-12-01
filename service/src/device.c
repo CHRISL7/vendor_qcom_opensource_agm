@@ -688,9 +688,11 @@ int device_set_metadata(struct device_obj *dev_obj, uint32_t size,
 {
    int ret = 0;
 
+   AGM_LOGI("Setting device metadata for %s\n", dev_obj->name);
    pthread_mutex_lock(&dev_obj->lock);
    metadata_free(&dev_obj->metadata);
    ret = metadata_copy(&(dev_obj->metadata), size, metadata);
+   metadata_print(&(dev_obj->metadata));
    pthread_mutex_unlock(&dev_obj->lock);
 
    return ret;
@@ -887,6 +889,19 @@ int device_get_start_refcnt(struct device_obj *dev_obj)
 
 }
 
+int device_get_state(struct device_obj *dev_obj)
+{
+    if (dev_obj == NULL) {
+        AGM_LOGE("Invalid device object\n");
+        return DEV_CLOSED;
+    }
+
+    if (dev_obj->parent_dev)
+        return dev_obj->parent_dev->state;
+    else
+        return dev_obj->state;
+}
+
 static struct device_group_data* device_get_group_data_by_name(char *dev_name)
 {
     struct device_group_data *grp_data = NULL;
@@ -959,7 +974,7 @@ int parse_snd_card()
          * Here, pcm->idname is in the form of "<dai_link->stream_name>
                                           <codec_name>-<num_codecs>"
          */
-        sscanf(buffer, "%02u-%02u: %80s", &dev_obj->card_id,
+        sscanf(buffer, "%02u-%02u: %79s", &dev_obj->card_id,
                            &dev_obj->pcm_id, dev_obj->name);
         AGM_LOGD("%d:%d:%s\n", dev_obj->card_id, dev_obj->pcm_id, dev_obj->name);
 

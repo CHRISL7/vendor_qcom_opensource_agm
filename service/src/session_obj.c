@@ -343,6 +343,23 @@ done:
     pthread_mutex_unlock(&sess_pool->lock);
     return obj;
 }
+int session_obj_valid_check(uint64_t hndl)
+{
+
+    struct session_obj *obj = NULL;
+    struct listnode *node;
+
+    pthread_mutex_lock(&sess_pool->lock);
+    list_for_each(node, &sess_pool->session_list) {
+        obj = node_to_item(node, struct session_obj, node);
+        if (obj == hndl) {
+            pthread_mutex_unlock(&sess_pool->lock);
+            return  1;
+        }
+    }
+    pthread_mutex_unlock(&sess_pool->lock);
+    return 0;
+}
 
 /* returns session_obj associated with session id */
 int session_obj_get(int session_id, struct session_obj **obj)
@@ -660,8 +677,8 @@ static int session_apply_aif_device_params(struct session_obj *sess_obj,
         return ret;
 
     pthread_mutex_lock(&dev_obj->lock);
-    if ((dev_obj->state == DEV_OPENED || dev_obj->state == DEV_STARTED ||
-        dev_obj->state == DEV_PREPARED) && dev_obj->params != NULL) {
+
+    if ((device_get_state(dev_obj) != DEV_CLOSED) && dev_obj->params != NULL) {
         ret = graph_set_config(sess_obj->graph, dev_obj->params,
                 dev_obj->params_size);
         if (ret)
@@ -748,14 +765,16 @@ static int session_connect_aif(struct session_obj *sess_obj,
     //step 2.c set cached params for stream only in closed
     if (sess_obj->state == SESSION_CLOSED && sess_obj->params != NULL) {
         ret = graph_set_config(graph, sess_obj->params, sess_obj->params_size);
+        /* clean up params irrespective of success or failure to avoid
+         * impact to next usecase */
+        free(sess_obj->params);
+        sess_obj->params = NULL;
+        sess_obj->params_size = 0;
         if (ret) {
             AGM_LOGE("Error:%d setting session cached params: %d\n",
                 ret, sess_obj->sess_id);
             goto graph_cleanup;
         }
-        free(sess_obj->params);
-        sess_obj->params = NULL;
-        sess_obj->params_size = 0;
     }
 
     //step 2.d set cached streamdevice params
@@ -1049,7 +1068,7 @@ static int session_start(struct session_obj *sess_obj)
                     goto done;
                 }
 
-                if (ec_ref_dev_obj->state != DEV_STARTED) {
+                if (device_get_state(ec_ref_dev_obj) != DEV_STARTED) {
                     AGM_LOGE("Error:%d Device object with aif id:%d\n"
                               "not in STARTED state, current state:%d\n",
                               ret, sess_obj->ec_ref_aif_id,
@@ -1701,6 +1720,7 @@ int session_obj_set_sess_aif_metadata(struct session_obj *sess_obj,
     int ret = 0;
     struct aif *aif_obj = NULL;
 
+    AGM_LOGI("Setting metadata for sess aif id %d\n", aif_id);
     pthread_mutex_lock(&sess_obj->lock);
     ret = aif_obj_get(sess_obj, aif_id, &aif_obj);
     if (ret) {
@@ -1716,9 +1736,11 @@ int session_obj_set_sess_aif_metadata(struct session_obj *sess_obj,
                   sess_id:%d, aif_id:%d \n",
                   sess_obj->sess_id, aif_obj->aif_id);
     }
+    metadata_print(&(aif_obj->sess_aif_meta));
 
 done:
     pthread_mutex_unlock(&sess_obj->lock);
+    AGM_LOGI("Exit");
     return ret;
 }
 
@@ -1809,15 +1831,15 @@ int session_obj_register_cb(struct session_obj *sess_obj, agm_event_cb cb,
     struct session_cb *sess_cb = NULL;
 
     pthread_mutex_lock(&sess_obj->cb_pool_lock);
-    sess_cb = calloc(1, sizeof(struct session_cb));
-    if (!sess_cb) {
-        AGM_LOGE("Error creating session_cb object with sess_id:%d\n",
-                                             sess_obj->sess_id);
-        ret = -ENOMEM;
-        goto done;
-    }
-
     if (cb != NULL) {
+        sess_cb = calloc(1, sizeof(struct session_cb));
+        if (!sess_cb) {
+            AGM_LOGE("Error creating session_cb object with sess_id:%d\n",
+                                             sess_obj->sess_id);
+            ret = -ENOMEM;
+            goto done;
+        }
+
         sess_cb->cb = cb;
         sess_cb->client_data = client_data;
         sess_cb->evt_type = evt_type;
@@ -1825,7 +1847,6 @@ int session_obj_register_cb(struct session_obj *sess_obj, agm_event_cb cb,
                                            client_data, evt_type);
         list_add_tail(&sess_obj->cb_pool, &sess_cb->node);
     } else {
-        struct session_cb *sess_cb;
         struct listnode *node, *next;
         list_for_each_safe(node, next, &sess_obj->cb_pool) {
             sess_cb = node_to_item(node, struct session_cb, node);
